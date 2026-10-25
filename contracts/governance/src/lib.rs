@@ -1,8 +1,19 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
+    contract, contractclient, contracterror, contractimpl, contracttype, Address, BytesN, Env,
+    Symbol,
 };
+
+#[contractclient(name = "KeeperRegistryClient")]
+pub trait IKeeperRegistry {
+    fn set_fee_bps(env: Env, admin: Address, new_bps: u32);
+    fn set_min_reward(env: Env, admin: Address, min_reward: i128);
+    fn set_reputation_floor(env: Env, admin: Address, floor_bps: u32);
+    fn pause(env: Env, admin: Address);
+    fn unpause(env: Env, admin: Address);
+    fn transfer_admin(env: Env, admin: Address, new_admin: Address);
+}
 
 pub const ONE_TOKEN: i128 = 10_000_000; // 10^7 stroops (7 decimals)
 pub const DEFAULT_PROPOSAL_THRESHOLD: i128 = 100_000 * ONE_TOKEN; // 100,000 KPRS
@@ -651,6 +662,35 @@ impl GovernanceContract {
     }
 
     /// Returns the total token supply of KPRS.
+    /// Hands the registry admin role to this governance contract.
+    ///
+    /// Requires authorization from `current_admin`. When invoked, this governance
+    /// contract calls `registry.transfer_admin(&current_admin, &governance_address)`,
+    /// satisfying the dual-authorization requirement where both `current_admin` and
+    /// `new_admin` (this contract) must authorize the handover.
+    pub fn accept_admin(
+        env: Env,
+        current_admin: Address,
+        registry: Address,
+    ) -> Result<(), GovernanceError> {
+        current_admin.require_auth();
+
+        let governance_addr = env.current_contract_address();
+        let client = KeeperRegistryClient::new(&env, &registry);
+
+        if matches!(
+            client.try_transfer_admin(&current_admin, &governance_addr),
+            Ok(Ok(()))
+        ) {
+            env.events().publish(
+                (Symbol::new(&env, "admin_migrated"), current_admin, governance_addr),
+                registry,
+            );
+            Ok(())
+        } else {
+            Err(GovernanceError::RegistryCallFailed)
+        }
+    }
     pub fn total_token_supply(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -830,3 +870,4 @@ impl GovernanceContract {
 
 #[cfg(test)]
 mod test;
+
